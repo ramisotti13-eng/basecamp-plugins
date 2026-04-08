@@ -65,18 +65,8 @@ def _render_cpu(pct):
     draw = ImageDraw.Draw(img)
     _centered(draw, 8, "CPU", _FONT_M, _CYAN)
     color = _color_for_pct(pct)
-    _centered(draw, 30, f"{pct:.0f}%", _FONT_B, color)
-    _draw_bar(draw, 60, pct, color)
-    # Per-core mini text
-    if psutil:
-        cores = psutil.cpu_percent(percpu=True, interval=0)
-        if cores:
-            n = len(cores)
-            txt = " ".join(f"{int(c)}" for c in cores[:8])  # max 8 cores shown
-            _centered(draw, 78, txt, _FONT_S, _GRAY)
-            if n > 8:
-                txt2 = " ".join(f"{int(c)}" for c in cores[8:16])
-                _centered(draw, 90, txt2, _FONT_S, _GRAY)
+    _centered(draw, 34, f"{pct:.0f}%", _FONT_B, color)
+    _draw_bar(draw, 68, pct, color)
     return img
 
 
@@ -91,13 +81,16 @@ def _render_ram(pct, used_gb, total_gb):
     return img
 
 
-def _render_temp(label, temp_c):
+def _render_temp(label, temp_c, unit="C"):
     img = Image.new("RGB", (102, 102), _BG)
     draw = ImageDraw.Draw(img)
     _centered(draw, 8, label.upper()[:8], _FONT_M, _CYAN)
     color = _color_for_temp(temp_c)
-    _centered(draw, 32, f"{temp_c:.0f}\u00b0C", _FONT_B, color)
-    # Temperature arc visualization
+    if unit == "F":
+        temp_show = temp_c * 9 / 5 + 32
+        _centered(draw, 32, f"{temp_show:.0f}\u00b0F", _FONT_B, color)
+    else:
+        _centered(draw, 32, f"{temp_c:.0f}\u00b0C", _FONT_B, color)
     pct = min(100, max(0, (temp_c / 100) * 100))
     _draw_bar(draw, 64, pct, color)
     return img
@@ -224,14 +217,18 @@ class Plugin:
                                   mem.total / (1024**3))
 
             elif atype == "mon_temp":
+                unit = act.get("action", "").strip().upper()
+                unit = unit if unit == "F" else "C"
                 temp, label = _get_cpu_temp()
                 if temp is not None:
-                    img = _render_temp(label, temp)
+                    img = _render_temp(label, temp, unit)
 
             elif atype == "mon_gpu":
+                unit = act.get("action", "").strip().upper()
+                unit = unit if unit == "F" else "C"
                 temp, label = _get_gpu_temp()
                 if temp is not None:
-                    img = _render_temp(label, temp)
+                    img = _render_temp(label, temp, unit)
 
             elif atype == "mon_disk":
                 path = act.get("action", "/") or "/"
