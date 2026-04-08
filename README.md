@@ -8,6 +8,7 @@ Optional plugins for [BaseCamp Linux](https://github.com/Ramisotti/mountain-time
 |--------|-------------|
 | [Philips Hue](hue_control/) | Control Hue lights & scenes from DisplayPad buttons |
 | [System Monitor](system_monitor/) | Live CPU, RAM, GPU temp and disk usage on DisplayPad |
+| [DisplayPad Clock](dp_clock/) | Live clock on DisplayPad — seconds, AM/PM, date display |
 
 ## Installation
 
