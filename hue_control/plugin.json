@@ -1,0 +1,11 @@
+{
+  "id": "hue_control",
+  "name": "Philips Hue",
+  "version": "1.0",
+  "author": "BaseCamp Linux",
+  "description": "Control your Philips Hue lights from DisplayPad buttons",
+  "help": "First pair your Hue Bridge in the plugin panel (press the bridge button, then click 'Pair'). Assign 'Hue: Toggle' or 'Hue: Scene' actions to DisplayPad buttons to control lights.",
+  "type": ["panel", "service", "action"],
+  "entry": "__init__",
+  "requires": []
+}

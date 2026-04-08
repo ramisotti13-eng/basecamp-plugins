@@ -1,0 +1,12 @@
+{
+  "plugins": [
+    {
+      "id": "hue_control",
+      "name": "Philips Hue",
+      "version": "1.0",
+      "description": "Control your Philips Hue lights from DisplayPad buttons",
+      "author": "BaseCamp Linux",
+      "url": "https://github.com/Ramisotti/basecamp-plugins/tree/main/hue_control"
+    }
+  ]
+}
