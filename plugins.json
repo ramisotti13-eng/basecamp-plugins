@@ -6,7 +6,15 @@
       "version": "1.0",
       "description": "Control your Philips Hue lights from DisplayPad buttons",
       "author": "BaseCamp Linux",
-      "url": "https://github.com/Ramisotti/basecamp-plugins/tree/main/hue_control"
+      "url": "https://github.com/ramisotti13-eng/basecamp-plugins/tree/main/hue_control"
+    },
+    {
+      "id": "system_monitor",
+      "name": "System Monitor",
+      "version": "1.0",
+      "description": "Live CPU, RAM, GPU temperature and disk usage on DisplayPad buttons",
+      "author": "BaseCamp Linux",
+      "url": "https://github.com/ramisotti13-eng/basecamp-plugins/tree/main/system_monitor"
     }
   ]
 }
