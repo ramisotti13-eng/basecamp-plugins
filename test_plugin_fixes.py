@@ -175,6 +175,7 @@ class Win:
         self.rebuilds += 1
         self._built_connected = self.p._connected
         self._built_error = getattr(self.p, "_last_error", "")
+        self._built_scenes = set(self.p._scenes)
 
     refresh = hue.HueWindow.refresh
 
@@ -184,6 +185,7 @@ class Plug:
     _last_error = "unauthorized user"
     _groups = {}
     _lights = {}
+    _scenes = {}
 
 
 win = Win()
@@ -204,6 +206,68 @@ win.p._connected = True
 win.refresh()
 check("and so does the bridge coming back", win.rebuilds == before + 2,
       win.rebuilds - before)
+
+# Scenes reaching a window that was built without them (#16: All On after
+# pairing showed groups and lights and never the scenes).
+win.p._scenes = {"s1": {"name": "Relax"}}
+win.refresh()
+check("scenes that arrive later rebuild the window", win.rebuilds == before + 3,
+      win.rebuilds - before)
+win.refresh()
+check("and only once", win.rebuilds == before + 3, win.rebuilds - before)
+
+# A first fetch that did not ask for scenes still gets them (#16).
+_scene = {"s1": {"name": "Relax", "type": "GroupScene", "group": "1"}}
+first = fetch_with({"lights": {"1": {"name": "Desk"}},
+                    "groups": {"1": {"name": "Woonkamer", "type": "Room"}},
+                    "scenes": _scene})
+check("a first fetch brings the scenes even unasked", list(first._scenes) == ["s1"],
+      first._scenes)
+
+# Everything that shows the bridge asks for it itself, since the service
+# only polls while a Hue key is on the page the pad shows (#16).
+import threading as _thr                                      # noqa: E402
+
+asker = hue.Plugin.__new__(hue.Plugin)
+asker.ctx = FetchCtx()
+asker._lock = _thr.RLock()
+asker._bridge_ip, asker._api_key = "", ""
+asker._fetching, asker._waiters = False, []
+check("with no bridge paired there is nothing to ask", asker.refresh_async() is False)
+
+asker._bridge_ip, asker._api_key = "10.0.0.2", "key"
+fetched = _thr.Event()
+asker._fetch = lambda include_scenes=False: (
+    fetched.set() if include_scenes else None)
+asker._update_panel_status = lambda: None
+ran = []
+check("a paired bridge is asked", asker.refresh_async(lambda: ran.append(1)) is True)
+check("for everything, scenes included", fetched.wait(2))
+check("and a second question while it is out is not sent twice",
+      asker.refresh_async() is True)
+asker._win = None
+asker._update_displaypad = lambda: None
+asker._on_fetched()
+check("whoever asked hears back once it has answered", ran == [1], ran)
+asker._on_fetched()
+check("and only once", ran == [1], ran)
+
+
+class Label:
+    def configure(self, **kw):
+        pass
+
+
+paired = hue.Plugin.__new__(hue.Plugin)
+paired.ctx = FetchCtx()
+paired._pair_btn = paired._pair_lbl = Label()
+asked_after_pairing = []
+paired.refresh_async = lambda on_done=None: asked_after_pairing.append(1)
+paired._on_paired(True)
+check("pairing asks the bridge straight away", asked_after_pairing == [1],
+      asked_after_pairing)
+paired._on_paired(False)
+check("a failed pairing does not", asked_after_pairing == [1], asked_after_pairing)
 
 silent = fetch_with({"lights": None, "groups": None})
 check("a bridge that says nothing says so by address",

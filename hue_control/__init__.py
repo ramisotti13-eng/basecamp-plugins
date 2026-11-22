@@ -151,6 +151,8 @@ class Plugin:
         self._connected = False
         self._last_error = ""   # why not, for the status line (#16)
         self._win = None  # HueWindow instance
+        self._fetching = False
+        self._waiters = []      # run on the interface thread after a fetch
 
         ctx.register_translations({
             "en": {
@@ -164,6 +166,7 @@ class Plugin:
                 "hue_connected":   "Connected",
                 "hue_disconnected": "Not connected",
                 "hue_no_bridge":   "Enter Bridge IP and pair first",
+                "hue_connecting":  "Asking the bridge...",
                 "hue_lights":      "Lights",
                 "hue_groups":      "Groups",
                 "hue_scenes":      "Scenes",
@@ -188,6 +191,7 @@ class Plugin:
                 "hue_connected":   "Verbunden",
                 "hue_disconnected": "Nicht verbunden",
                 "hue_no_bridge":   "Bridge-IP eingeben und koppeln",
+                "hue_connecting":  "Frage die Bridge...",
                 "hue_lights":      "Lampen",
                 "hue_groups":      "Gruppen",
                 "hue_scenes":      "Szenen",
@@ -249,6 +253,7 @@ class Plugin:
         ).pack(padx=16, pady=(20, 8))
 
         self._update_panel_status()
+        self.refresh_async()
         return frame
 
     def _update_panel_status(self):
@@ -258,6 +263,9 @@ class Plugin:
             n = len(self._lights)
             self._panel_status.configure(
                 text=f"\u2022 {self.ctx.T('hue_connected')}  ({n} lights)", text_color=GRN)
+        elif self._fetching and not self._last_error:
+            self._panel_status.configure(
+                text=f"\u2022 {self.ctx.T('hue_connecting')}", text_color=FG2)
         else:
             why = getattr(self, "_last_error", "")
             text = f"\u2022 {self.ctx.T('hue_disconnected')}"
@@ -268,6 +276,7 @@ class Plugin:
     # ── Hue Control Window ───────────────────────────────────────────────────
 
     def _open_window(self):
+        self.refresh_async()
         if self._win and self._win.winfo_exists():
             self._win.focus()
             return
@@ -304,6 +313,41 @@ class Plugin:
         self._pair_lbl.configure(
             text=self.ctx.T("hue_paired") if ok else self.ctx.T("hue_pair_fail"),
             text_color=GRN if ok else RED)
+        if ok:
+            # Nothing asked the bridge after pairing, so a window opened
+            # before it went on saying there was no bridge (#16).
+            self.refresh_async()
+
+    def refresh_async(self, on_done=None):
+        """Ask the bridge for its lights, groups and scenes, off the
+        interface thread. `on_done` runs on the interface thread afterwards.
+
+        The service polls the bridge, but it only runs while a Hue key is on
+        the page the pad shows. Everything else that shows the bridge's state
+        (this panel, the control window, the dropdowns in the Button Actions
+        window) found nothing on any other page and said to pair a bridge
+        that was paired, until a page with a Hue key came up and filled it
+        all in (#16). They ask for it themselves now.
+
+        Returns whether a bridge is configured to ask.
+        """
+        if not (self._bridge_ip and self._api_key):
+            return False
+        if on_done is not None:
+            with self._lock:
+                self._waiters.append(on_done)
+        if self._fetching:
+            return True             # the answer on its way serves this too
+        self._fetching = True
+        self._update_panel_status()
+
+        def run():
+            try:
+                self._fetch(include_scenes=True)
+            finally:
+                self._fetching = False
+        threading.Thread(target=run, daemon=True).start()
+        return True
 
     # ── State fetching ───────────────────────────────────────────────────────
 
@@ -341,7 +385,10 @@ class Plugin:
             # screen it was gathered for.
             self.ctx.schedule(0, self._on_fetched)
             return
-        if include_scenes:
+        # Scenes change rarely, so the poll leaves them out, but never having
+        # had them is a different matter: a first fetch that did not ask for
+        # them (All On, say) left the window without scenes for good (#16).
+        if include_scenes or not self._scenes:
             scenes = _hue("GET", self._bridge_ip, self._api_key, "scenes")
             if isinstance(scenes, dict):
                 with self._lock:
@@ -356,6 +403,13 @@ class Plugin:
         if self._win and self._win.winfo_exists():
             self._win.refresh()
         self._update_displaypad()
+        with self._lock:
+            waiters, self._waiters = self._waiters, []
+        for cb in waiters:
+            try:
+                cb()
+            except Exception as e:
+                print(f"[hue_control] after fetch: {e}", flush=True)
 
     # ── Action handlers ──────────────────────────────────────────────────────
 
@@ -675,10 +729,15 @@ class HueWindow(ctk.CTkToplevel):
         p = self.p
         self._built_connected = p._connected
         self._built_error = getattr(p, "_last_error", "")
+        self._built_scenes = set(p._scenes)
         if not p._connected:
             why = self._built_error
+            if not why:
+                # Paired and not asked yet is not the same as not paired.
+                why = (p.ctx.T("hue_connecting") if p._api_key and p._fetching
+                       else p.ctx.T("hue_no_bridge"))
             ctk.CTkLabel(self._scroll,
-                         text=why or p.ctx.T("hue_no_bridge"),
+                         text=why,
                          font=("Helvetica", 11), text_color=FG2).pack(pady=(30, 6))
             # A window that only says "not connected" leaves nothing to do
             # but close it and guess (#16). The bridge's own reason is above,
@@ -833,7 +892,8 @@ class HueWindow(ctk.CTkToplevel):
         if (getattr(self, "_built_connected", None) != p._connected
                 or getattr(self, "_built_error", None) != getattr(p, "_last_error", "")
                 or set(self._group_rows) != set(p._groups)
-                or set(self._light_rows) != set(p._lights)):
+                or set(self._light_rows) != set(p._lights)
+                or getattr(self, "_built_scenes", None) != set(p._scenes)):
             self._build_all()
             return
 
