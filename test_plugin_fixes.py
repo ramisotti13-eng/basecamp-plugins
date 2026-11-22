@@ -322,6 +322,92 @@ check("saves it", saves != [], saves)
 check("and wakes the drawing rather than leaving it to the next round",
       ed._wake.is_set())
 
+# No GPU reading: the key says so instead of keeping its old picture, and the
+# CPU+GPU cycle shows the gap instead of the CPU twice (#17).
+sm = load("system_monitor")
+
+
+class _MonCtx:
+    def __init__(self, actions):
+        self.actions = actions
+        self.pushed = {}
+
+    def get_displaypad_current_page(self):
+        return 0
+
+    def get_displaypad_actions(self, page=None):
+        return self.actions
+
+    def get_displaypad(self):
+        return None
+
+    def push_displaypad_image(self, i, img):
+        self.pushed[i] = img
+
+    def T(self, key):
+        return {"mon_no_sensor": "no sensor"}.get(key, key)
+
+
+import tempfile as _tf                                         # noqa: E402
+import shared.config as _cfg                                   # noqa: E402
+
+_real_cfg_dir = _cfg.CONFIG_DIR
+_cfg.CONFIG_DIR = _tf.mkdtemp(prefix="sm-test-")
+_real_gpu, _real_cpu, _real_time = sm._get_gpu_temp, sm._get_cpu_temp, sm.time.time
+sm._get_gpu_temp = lambda: (None, "GPU")
+sm._get_cpu_temp = lambda: (55.0, "CPU")
+try:
+    mon = sm.Plugin.__new__(sm.Plugin)
+    mon.ctx = _MonCtx([{"type": "mon_gpu", "action": ""},
+                       {"type": "mon_temp_both", "action": "5"}]
+                      + [{"type": "none", "action": ""}] * 10)
+    mon._hashes, mon._drawn_page = {}, None
+    sm.time.time = lambda: 7.0          # the GPU half of a five second cycle
+    mon._update()
+    check("a GPU key with no reading still gets a picture (#17)", 0 in mon.ctx.pushed,
+          sorted(mon.ctx.pushed))
+    gpu_only = mon.ctx.pushed.get(0)
+    cycle_gpu = mon.ctx.pushed.get(1)
+    sm.time.time = lambda: 2.0          # the CPU half
+    mon._update()
+    cycle_cpu = mon.ctx.pushed.get(1)
+    check("the CPU+GPU cycle shows the missing GPU in its GPU half",
+          cycle_gpu is not None and gpu_only is not None
+          and cycle_gpu.tobytes() == gpu_only.tobytes())
+    check("and the CPU in the other, so the cycle is visible",
+          cycle_cpu is not None and cycle_cpu.tobytes() != cycle_gpu.tobytes())
+finally:
+    sm._get_gpu_temp, sm._get_cpu_temp, sm.time.time = _real_gpu, _real_cpu, _real_time
+    _cfg.CONFIG_DIR = _real_cfg_dir
+
+# A failing nvidia-smi (the card switched off) is not run every two seconds.
+_runs = []
+
+
+class _Failed:
+    stdout = ""
+    returncode = 9
+
+
+_real_run, _real_mono = sm.subprocess.run, sm.time.monotonic
+sm.subprocess.run = lambda *a, **kw: (_runs.append(1), _Failed())[1]
+sm._nvidia_smi = True
+sm._nvidia_smi_retry_at = 0.0
+_now = [1000.0]
+sm.time.monotonic = lambda: _now[0]
+try:
+    sm._nvidia_smi_temp()
+    _now[0] += 2
+    sm._nvidia_smi_temp()
+    check("nvidia-smi failing is not asked again on the next tick", len(_runs) == 1,
+          len(_runs))
+    _now[0] += 120
+    sm._nvidia_smi_temp()
+    check("but is again a while later, the card may be back", len(_runs) == 2,
+          len(_runs))
+finally:
+    sm.subprocess.run, sm.time.monotonic = _real_run, _real_mono
+
 silent = fetch_with({"lights": None, "groups": None})
 check("a bridge that says nothing says so by address",
       "10.0.0.2" in silent._last_error, silent._last_error)
