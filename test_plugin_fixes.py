@@ -28,6 +28,8 @@ if not os.path.isdir(APP):
     sys.exit(0)
 sys.path.insert(0, APP)
 os.environ["HOME"] = tempfile.mkdtemp(prefix="basecamp-plugin-fixes-")
+# Frames go to the runtime directory (#105); never into a running application's.
+os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="basecamp-plugin-fixes-run-")
 
 failures = []
 
@@ -351,8 +353,8 @@ class _MonCtx:
 import tempfile as _tf                                         # noqa: E402
 import shared.config as _cfg                                   # noqa: E402
 
-_real_cfg_dir = _cfg.CONFIG_DIR
-_cfg.CONFIG_DIR = _tf.mkdtemp(prefix="sm-test-")
+_real_cfg_dir, _real_frame_dir = _cfg.CONFIG_DIR, _cfg.FRAME_DIR
+_cfg.CONFIG_DIR = _cfg.FRAME_DIR = _tf.mkdtemp(prefix="sm-test-")
 _real_gpu, _real_cpu, _real_time = sm._get_gpu_temp, sm._get_cpu_temp, sm.time.time
 sm._get_gpu_temp = lambda: (None, "GPU")
 sm._get_cpu_temp = lambda: (55.0, "CPU")
@@ -378,7 +380,7 @@ try:
           cycle_cpu is not None and cycle_cpu.tobytes() != cycle_gpu.tobytes())
 finally:
     sm._get_gpu_temp, sm._get_cpu_temp, sm.time.time = _real_gpu, _real_cpu, _real_time
-    _cfg.CONFIG_DIR = _real_cfg_dir
+    _cfg.CONFIG_DIR, _cfg.FRAME_DIR = _real_cfg_dir, _real_frame_dir
 
 # A failing nvidia-smi (the card switched off) is not run every two seconds.
 _runs = []

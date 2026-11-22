@@ -118,6 +118,19 @@ def _current_page(ctx):
         return 0
 
 
+def _frame_dir():
+    """Where the frames go: in memory from BaseCamp 3.2.3 on, so that a key
+    redrawn every second does not write to the disk every second (#105). An
+    older application has no FRAME_DIR and gets them in its config directory,
+    which is where it looks for them."""
+    try:
+        from shared.config import FRAME_DIR
+        return FRAME_DIR
+    except ImportError:
+        from shared.config import CONFIG_DIR
+        return CONFIG_DIR
+
+
 def _save_frame(img, path):
     """Write the frame beside its destination and move it into place.
 
@@ -484,7 +497,7 @@ class Plugin:
         """
         import os, hashlib
         try:
-            from shared.config import CONFIG_DIR
+            FRAME_DIR = _frame_dir()
         except ImportError:
             return
         actions = self._current_actions()
@@ -513,7 +526,7 @@ class Plugin:
 
             # Save rendered image to disk so DisplayPad's normal upload uses it
             page = _current_page(self.ctx)
-            img_path = os.path.join(CONFIG_DIR, f"dp_hue_p{page}_k{i}.png")
+            img_path = os.path.join(FRAME_DIR, f"dp_hue_p{page}_k{i}.png")
             _save_frame(img, img_path)
 
             # Register in DisplayPad's _images dict so full uploads include it

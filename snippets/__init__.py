@@ -194,6 +194,19 @@ def _wrap(draw, text, font, max_lines):
     return lines
 
 
+def _frame_dir():
+    """Where the frames go: in memory from BaseCamp 3.2.3 on, so that a key
+    redrawn every second does not write to the disk every second (#105). An
+    older application has no FRAME_DIR and gets them in its config directory,
+    which is where it looks for them."""
+    try:
+        from shared.config import FRAME_DIR
+        return FRAME_DIR
+    except ImportError:
+        from shared.config import CONFIG_DIR
+        return CONFIG_DIR
+
+
 def _save_frame(img, path):
     """Write the frame beside its destination and move it into place.
 
@@ -356,7 +369,7 @@ class Plugin:
 
     def _draw_keys(self, drawn):
         try:
-            from shared.config import CONFIG_DIR
+            FRAME_DIR = _frame_dir()
         except ImportError:
             return
         dp = self.ctx.get_displaypad()
@@ -389,7 +402,7 @@ class Plugin:
                 continue
             drawn[i] = state
             img = _render_snippet(slot, label, text)
-            path = os.path.join(CONFIG_DIR, f"dp_snippet_p{page}_k{i}.png")
+            path = os.path.join(FRAME_DIR, f"dp_snippet_p{page}_k{i}.png")
             _save_frame(img, path)
             if dp is not None:
                 dp._images[str(i)] = path

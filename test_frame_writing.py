@@ -33,6 +33,10 @@ sys.path.insert(0, APP)
 
 _TMP_HOME = tempfile.mkdtemp(prefix="basecamp-plugin-test-")
 os.environ["HOME"] = _TMP_HOME
+# Frames go to the runtime directory (#105). A test must never write into the
+# one of a running application.
+_TMP_RUN = tempfile.mkdtemp(prefix="basecamp-plugin-run-")
+os.environ["XDG_RUNTIME_DIR"] = _TMP_RUN
 
 try:
     from PIL import Image
@@ -40,7 +44,7 @@ except ImportError:
     print("Pillow not installed, skipping")
     sys.exit(0)
 
-from shared.config import CONFIG_DIR   # noqa: E402
+from shared.config import CONFIG_DIR, FRAME_DIR   # noqa: E402
 
 failures = []
 
@@ -149,7 +153,7 @@ for plugin, action_type, action_value, prefix in WIDGETS:
         except Exception as exc:
             check("%s renders a frame" % plugin, False, repr(exc))
             break
-        files = sorted(f for f in os.listdir(CONFIG_DIR)
+        files = sorted(f for f in os.listdir(FRAME_DIR)
                        if f.startswith(prefix) and f.endswith(".png"))
         written[page] = files
         check("%s puts the page in the file name (page %d)" % (plugin, page),
@@ -161,6 +165,26 @@ for plugin, action_type, action_value, prefix in WIDGETS:
         check("%s does not overwrite the other page's file" % plugin,
               len(set(written[0]) | set(written[2])) >= 2,
               sorted(set(written[0]) | set(written[2]))[:4])
+
+# ── In memory, not on the disk (#105) ────────────────────────────────────────
+
+check("the frames are in the runtime directory, which is memory",
+      FRAME_DIR.startswith(_TMP_RUN), FRAME_DIR)
+on_disk = [f for f in os.listdir(CONFIG_DIR)
+           if f.startswith("dp_") and f.endswith(".png")]
+check("and not one of them in the config directory", not on_disk, on_disk[:4])
+
+import shared.config as _cfg   # noqa: E402
+
+_real_frame_dir = _cfg.FRAME_DIR
+del _cfg.FRAME_DIR             # an application from before 3.2.3
+try:
+    for plugin in ("dp_clock", "system_monitor", "hue_control", "dp_video",
+                   "dp_pipe_text", "snippets"):
+        check("%s falls back to the config directory on an older application"
+              % plugin, load(plugin)._frame_dir() == CONFIG_DIR)
+finally:
+    _cfg.FRAME_DIR = _real_frame_dir
 
 # ── Nothing may go back to a page-less name ──────────────────────────────────
 # dp_video and dp_pipe_text render from a source this test cannot stand in for,
@@ -271,6 +295,7 @@ for plugin in ("dp_clock", "system_monitor", "hue_control", "dp_video",
           threads)
 
 shutil.rmtree(_TMP_HOME, ignore_errors=True)
+shutil.rmtree(_TMP_RUN, ignore_errors=True)
 
 print()
 if failures:
