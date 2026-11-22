@@ -267,6 +267,10 @@ def _save_frame(img, path):
     img.save(tmp, "PNG")
     _os.replace(tmp, path)
 
+_MON_TYPES = ("mon_cpu", "mon_ram", "mon_temp", "mon_gpu", "mon_temp_both",
+              "mon_disk", "mon_disk_cycle")
+
+
 class Plugin:
     panel_id = "system_monitor"
     panel_label = "System Monitor"
@@ -274,7 +278,8 @@ class Plugin:
     def __init__(self, ctx):
         self.ctx = ctx
         self._stop = threading.Event()
-        self._hashes = {}  # key_index -> md5
+        self._hashes = {}
+        self._drawn_page = None  # key_index -> md5
 
         ctx.register_translations({
             "en": {
@@ -316,6 +321,9 @@ class Plugin:
         if not psutil:
             print("[system_monitor] psutil not installed, plugin disabled")
             return
+        # Started means the page was entered, and on a page just entered
+        # nothing this plugin draws is on the pad yet (#104).
+        self._drawn_page = None
         # Each thread carries its own stop, so a stopped one can never be
         # revived alongside its successor (see the other widget plugins).
         self._stop.set()
@@ -333,7 +341,7 @@ class Plugin:
             self._update()
             stop.wait(2)
 
-    def _current_actions(self):
+    def _current_actions(self, page=None):
         """The 12 button actions of the page that is actually on the pad.
 
         Not shared.config._load_displaypad_actions(): its page argument
@@ -341,7 +349,7 @@ class Plugin:
         while the one on Main kept being painted, on whatever key sat at that
         index on the visible page (issues #82 and #70)."""
         try:
-            return self.ctx.get_displaypad_actions()
+            return self.ctx.get_displaypad_actions(page)
         except Exception:
             pass
         try:
@@ -356,12 +364,29 @@ class Plugin:
         except ImportError:
             return
 
-        actions = self._current_actions()
+        # The page this pass draws for, read once and before its actions. It
+        # used to be read again when each frame was written, so a switch while
+        # a pass was running filed the old page's frame under the new page's
+        # name and into its map, and the editor showed it there (#99).
+        page = _current_page(self.ctx)
+        if page != self._drawn_page:
+            # A key only draws when its picture changes. On a page just
+            # entered nothing has been drawn yet, whatever an earlier stay
+            # left in here, so the first pass draws every key (#104).
+            self._hashes.clear()
+            self._drawn_page = page
+        actions = self._current_actions(page)
         dp = self.ctx.get_displaypad()
 
         for i, act in enumerate(actions):
             atype = act.get("type", "")
             img = None
+            if atype not in _MON_TYPES:
+                # Not ours (any more). Whatever this key shows now, it is not
+                # the last thing drawn here, so the next time it is ours it
+                # draws again, even if the value has not moved (#99).
+                self._hashes.pop(i, None)
+                continue
 
             if atype == "mon_cpu":
                 pct = psutil.cpu_percent(interval=0)
@@ -432,10 +457,11 @@ class Plugin:
             h = hashlib.md5(raw).hexdigest()
             if self._hashes.get(i) == h:
                 continue
+            if _current_page(self.ctx) != page:
+                return              # the pad has moved on; this pass is for nobody
             self._hashes[i] = h
 
             # Save to disk so DisplayPad upload worker includes it
-            page = _current_page(self.ctx)
             img_path = os.path.join(CONFIG_DIR, f"dp_mon_p{page}_k{i}.png")
             _save_frame(img, img_path)
             if dp:

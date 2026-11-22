@@ -148,6 +148,7 @@ class Plugin:
         self.ctx = ctx
         self._stop = threading.Event()
         self._hashes = {}
+        self._drawn_page = None
         self._timer_state = "off"   # "off" | "running" | "stopping"
         self._elapsed = 0.0
         self._start_time = 0.0
@@ -169,6 +170,9 @@ class Plugin:
         away now, so a stop closely followed by a start is ordinary rather
         than rare.
         """
+        # Started means the page was entered, and on a page just entered
+        # nothing this plugin draws is on the pad yet (#104).
+        self._drawn_page = None
         self._stop.set()                # any predecessor ends here
         stop = threading.Event()
         self._stop = stop
@@ -212,7 +216,7 @@ class Plugin:
         if self._timer_state == "stopping":
             self._timer_state = "off"
 
-    def _current_actions(self):
+    def _current_actions(self, page=None):
         """The 12 button actions of the page that is actually on the pad.
 
         Not shared.config._load_displaypad_actions(): its page argument
@@ -220,7 +224,7 @@ class Plugin:
         the one on Main kept being painted, on whatever key sat at that index
         on the visible page (issues #82 and #70)."""
         try:
-            return self.ctx.get_displaypad_actions()
+            return self.ctx.get_displaypad_actions(page)
         except Exception:
             pass
         try:
@@ -235,11 +239,26 @@ class Plugin:
         except ImportError:
             return
 
-        actions = self._current_actions()
+        # The page this pass draws for, read once and before its actions. It
+        # used to be read again when each frame was written, so a switch while
+        # a pass was running filed the old page's frame under the new page's
+        # name and into its map, and the editor showed it there (#99).
+        page = _current_page(self.ctx)
+        if page != self._drawn_page:
+            # A key only draws when its picture changes. On a page just
+            # entered nothing has been drawn yet, whatever an earlier stay
+            # left in here, so the first pass draws every key (#104).
+            self._hashes.clear()
+            self._drawn_page = page
+        actions = self._current_actions(page)
         dp = self.ctx.get_displaypad()
 
         for i, act in enumerate(actions):
             if act.get("type") != "clock_display":
+                # Not a clock (any more): forget what was drawn here, so a
+                # clock put back on it draws again, also one that only shows
+                # the date and changes once a day (#99).
+                self._hashes.pop(i, None)
                 continue
 
             val = act.get("action", "").strip().lower()
@@ -251,9 +270,10 @@ class Plugin:
             h = hashlib.md5(raw).hexdigest()
             if self._hashes.get(i) == h:
                 continue
+            if _current_page(self.ctx) != page:
+                return              # the pad has moved on; this pass is for nobody
             self._hashes[i] = h
 
-            page = _current_page(self.ctx)
             img_path = os.path.join(CONFIG_DIR, f"dp_clock_p{page}_k{i}.png")
             _save_frame(img, img_path)
             if dp:

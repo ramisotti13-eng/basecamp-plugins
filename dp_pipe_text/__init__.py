@@ -459,25 +459,40 @@ class Plugin:
     # the user typed into that key's action field.
 
     def _scan_loop(self, stop):
+        # A full scan every two seconds, and one straight away when the page
+        # changes. Waiting out the two seconds after a switch left the keys of
+        # the page just entered with the previous page's readers, so a pipe
+        # that reports nothing new for a while showed nothing at all (#104).
+        last_page = None
+        next_scan = 0.0
         while not stop.is_set():
             try:
-                self._scan_once()
-            except Exception as e:
-                # A transient error here must never kill this daemon thread --
-                # log and keep scanning, same lesson as dp_clock issue #8.
+                page = self.ctx.get_displaypad_current_page()
+            except Exception:
+                page = None
+            if page != last_page or time.monotonic() >= next_scan:
+                last_page = page
+                next_scan = time.monotonic() + 2
                 try:
-                    print(f"[dp_pipe_text] scan error (continuing): {e}", flush=True)
-                except Exception:
-                    pass
-            stop.wait(2)
+                    self._scan_once()
+                except Exception as e:
+                    # A transient error here must never kill this daemon
+                    # thread -- log and keep scanning, same lesson as dp_clock
+                    # issue #8.
+                    try:
+                        print(f"[dp_pipe_text] scan error (continuing): {e}", flush=True)
+                    except Exception:
+                        pass
+            stop.wait(0.25)
 
     def _scan_once(self):
+        # The page first, then that page's actions: read the other way round,
+        # a switch in between paired one page's keys with the other's number.
+        cur_page = self.ctx.get_displaypad_current_page()
         try:
-            actions = self.ctx.get_displaypad_actions()
+            actions = self.ctx.get_displaypad_actions(cur_page)
         except Exception:
             return
-
-        cur_page = self.ctx.get_displaypad_current_page()
         assigned = {}
         for i, act in enumerate(actions):
             if act.get("type") != "pipe_text":
@@ -501,6 +516,9 @@ class Plugin:
                         _dbg(f"[DBG dp_pipe_text] key={key_index}: same raw, "
                               f"rebinding page {current['page']} -> {cur_page}")
                         current["page"] = cur_page
+                        # Whatever was last drawn for this page and key is
+                        # not necessarily what the key shows now.
+                        self._hashes.pop((cur_page, key_index), None)
                     continue
                 if current is not None:
                     # The action field changed (pipe path and/or command) --
@@ -566,6 +584,12 @@ class Plugin:
         # captured value, not re-query the current page, since a switch may
         # have already happened by the time a queued render is processed.
         page = self.ctx.get_displaypad_current_page()
+        # A reader starts when its key comes into view. The key shows
+        # whatever the page switch put there, so this reader's first message
+        # has to be drawn even if it says what the last one said: a battery
+        # that is still charging otherwise stayed black until its level moved
+        # (#104).
+        self._hashes.pop((page, key_index), None)
         self._readers[key_index] = {
             "path": path, "raw": raw, "stop": stop_event, "page": page,
             "thread": reader_thread, "work_event": work_event, "worker_thread": worker_thread,
@@ -722,16 +746,6 @@ class Plugin:
             return
         self._hashes[hash_key] = h
 
-        # Only write to the physical key right now if the page we're
-        # rendering for is actually the one on screen. Physical keys are
-        # shared hardware slots across pages: pushing unconditionally here
-        # used to let a reader bound to a different (background) page paint
-        # over whatever key is currently visible on the page you're actually
-        # looking at -- the bookkeeping dicts below were already gated on
-        # this, but the real hardware write wasn't.
-        if is_visible:
-            self.ctx.push_displaypad_image(key_index, img)
-
         # Persist the rendered frame to disk and register it as this key's
         # static image on the page it's actually bound to (the page passed
         # in, captured once when this reader was started -- never re-derived
@@ -761,3 +775,19 @@ class Plugin:
                     dp._page_images.setdefault(page, {})[str(key_index)] = img_path
         except Exception:
             pass
+
+        # Only write to the physical key right now if the page we're
+        # rendering for is actually the one on screen. Physical keys are
+        # shared hardware slots across pages: pushing unconditionally here
+        # used to let a reader bound to a different (background) page paint
+        # over whatever key is currently visible on the page you're actually
+        # looking at -- the bookkeeping dicts above were already gated on
+        # this, but the real hardware write wasn't.
+        #
+        # And only after the frame is filed under the key. The editor redraws
+        # a key's tile from that entry when told a frame arrived, so pushing
+        # first had it redraw the entry from before, and a pipe that then kept
+        # saying the same thing left a grey tile in the editor for good while
+        # the pad showed the text (#107).
+        if is_visible:
+            self.ctx.push_displaypad_image(key_index, img)
