@@ -111,35 +111,47 @@ def _font(size):
 
 
 def _render_snippet(slot, label, preview):
-    """The key's picture: its slot number, its name, and the text beneath.
+    """The key's picture: a strip naming the snippet, and its text beneath.
 
     A snippet key had no picture at all, on the pad or in the editor, so
-    twelve of them were twelve blank keys (#15).
+    twelve of them were twelve blank keys (#15). The first picture put only
+    the slot number in its strip and the name in large type under it, which
+    left about two lines for the text, and the text is what tells one
+    snippet from the next. The name is in the strip now, the slot number
+    only when there is no name, and the text has the rest of the key, its
+    own line breaks kept.
     """
     img = Image.new("RGB", (_TILE, _TILE), (18, 18, 34))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([0, 0, _TILE - 1, 13], fill=(14, 165, 233))
-    draw.text((4, 1), "#%s" % slot, fill=(10, 10, 20), font=_font(11))
+    draw.rectangle([0, 0, _TILE - 1, 15], fill=(14, 165, 233))
+    head = label.strip() or "#%s" % slot
+    head_lines = _wrap(draw, head, _font(11), 1)
+    draw.text((4, 1), head_lines[0] if head_lines else "", fill=(10, 10, 20),
+              font=_font(11))
 
-    # A snippet with a name is shown by it, with the text underneath. One
-    # without falls back to its own first line, which is all there is to say.
-    first_line = next((l for l in preview.splitlines() if l.strip()), "")
-    title = label.strip() or first_line.strip()
-
-    big, small = _font(13), _font(10)
-    y = 20
-    for line in _wrap(draw, title, big, 3 if label.strip() else 5):
-        draw.text((5, y), line, fill=(230, 230, 240), font=big)
-        y += 15
-
-    if label.strip():
-        y += 4
-        # However many lines are left below the name, so the wrap can put its
-        # dot on the last one that gets drawn.
-        room = max(0, (_TILE - 2 - y) // 12)
-        for line in _wrap(draw, " ".join(preview.split()), small, room):
-            draw.text((5, y), line, fill=(120, 120, 150), font=small)
-            y += 12
+    body = _font(11)
+    y, step = 19, 13
+    room = max(1, (_TILE - 2 - y) // step)
+    lines = []
+    paragraphs = [p for p in preview.splitlines()]
+    while paragraphs and not paragraphs[0].strip():
+        paragraphs.pop(0)
+    for n, para in enumerate(paragraphs):
+        if len(lines) >= room:
+            break
+        if not para.strip():
+            lines.append("")
+            continue
+        lines.extend(_wrap(draw, para, body, room - len(lines)))
+        if len(lines) >= room and any(q.strip() for q in paragraphs[n + 1:]):
+            # Full, with more of the text below: say so on the last line, the
+            # same way a line cut short says it.
+            last = lines[room - 1]
+            if not last.endswith("\u2026"):
+                lines[room - 1] = (last[:-1] + "\u2026") if len(last) > 1 else "\u2026"
+    for line in lines[:room]:
+        draw.text((5, y), line, fill=(205, 205, 220), font=body)
+        y += step
     return img
 
 
@@ -213,6 +225,8 @@ class Plugin:
         self._scroll = None
         self._save_lock = threading.Lock()
         self._stop = threading.Event()
+        self._wake = threading.Event()    # an edit to draw now, not in 2 s
+        self._pending_edit = {}           # row -> after() id of its commit
         self._load()
 
         ctx.register_translations({
@@ -319,6 +333,7 @@ class Plugin:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
 
     def _draw_loop(self, stop):
         drawn = {}
@@ -329,12 +344,13 @@ class Plugin:
                 # A transient failure must never end this thread, or the keys
                 # stay as they are until the plugin is disabled and enabled.
                 print(f"[snippets] draw error (continuing): {e}", flush=True)
-            stop.wait(2)
+            self._wake.wait(2)
+            self._wake.clear()
 
-    def _current_actions(self):
+    def _current_actions(self, page=None):
         """The 12 actions of the page on the pad, not of the main page (#82)."""
         try:
-            return self.ctx.get_displaypad_actions()
+            return self.ctx.get_displaypad_actions(page)
         except Exception:
             return []
 
@@ -344,8 +360,11 @@ class Plugin:
         except ImportError:
             return
         dp = self.ctx.get_displaypad()
+        # The page first and its actions after, read once: read again for
+        # each frame, a switch in between filed one page's key under the
+        # other's name (main repo #99).
         page = _current_page(self.ctx)
-        for i, act in enumerate(self._current_actions()):
+        for i, act in enumerate(self._current_actions(page)):
             if act.get("type") != "snippet":
                 continue
             try:
@@ -454,6 +473,8 @@ class Plugin:
         label_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
         label_entry.bind("<FocusOut>",
                          lambda e, idx=i, v=label_var: self._on_label_change(idx, v.get()))
+        label_entry.bind("<KeyRelease>",
+                         lambda e, idx=i: self._edit_soon(idx), add="+")
 
         uses_lbl = ctk.CTkLabel(top,
                                  text=f"{snip.get('uses', 0)} {self.ctx.T('snip_uses')}",
@@ -471,6 +492,8 @@ class Plugin:
         text_widget.bind("<FocusOut>",
                          lambda e, idx=i, w=text_widget: self._on_text_change(
                              idx, w.get("1.0", "end-1c")))
+        text_widget.bind("<KeyRelease>",
+                         lambda e, idx=i: self._edit_soon(idx), add="+")
 
         # Bottom: Test (left) + Delete (right)
         bot = ctk.CTkFrame(row, fg_color="transparent")
@@ -502,12 +525,48 @@ class Plugin:
             if self._snippets[idx].get("label", "") != value.strip():
                 self._snippets[idx]["label"] = value.strip()
                 self._save()
+                self._wake.set()
 
     def _on_text_change(self, idx, value):
         if 0 <= idx < len(self._snippets):
             if self._snippets[idx].get("text", "") != value:
                 self._snippets[idx]["text"] = value
                 self._save()
+                self._wake.set()
+
+    _EDIT_PAUSE_MS = 700
+
+    def _edit_soon(self, idx):
+        """Take what is in row `idx` once typing has paused.
+
+        An edit reached the snippet only when the field lost focus, which
+        clicking around in the same window, or switching to another screen,
+        does not reliably cause: the key went on showing the old text until
+        Test was pressed or the window lost focus (#15). Taken a moment after
+        the last keystroke instead, which keeps the saves to one per pause.
+        """
+        pending = self._pending_edit.pop(idx, None)
+        if pending is not None:
+            try:
+                self._frame.after_cancel(pending)
+            except Exception:
+                pass
+        try:
+            self._pending_edit[idx] = self._frame.after(
+                self._EDIT_PAUSE_MS, lambda: self._commit_row(idx))
+        except Exception:
+            self._commit_row(idx)
+
+    def _commit_row(self, idx):
+        self._pending_edit.pop(idx, None)
+        if not (0 <= idx < len(self._rows)):
+            return
+        row = self._rows[idx]
+        try:
+            self._on_label_change(idx, row["label_var"].get())
+            self._on_text_change(idx, row["text_widget"].get("1.0", "end-1c"))
+        except Exception:
+            pass       # the row went away in the meantime (deleted, rebuilt)
 
     def _add_snippet(self):
         # Flush any pending edits first

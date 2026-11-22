@@ -269,6 +269,59 @@ check("pairing asks the bridge straight away", asked_after_pairing == [1],
 paired._on_paired(False)
 check("a failed pairing does not", asked_after_pairing == [1], asked_after_pairing)
 
+# An edit reaches the key once typing pauses, not only when the field loses
+# focus, which clicking about in the same window does not cause (#15).
+class _Var:
+    def __init__(self, v):
+        self.v = v
+
+    def get(self):
+        return self.v
+
+
+class _Text:
+    def __init__(self, v):
+        self.v = v
+
+    def get(self, *_a):
+        return self.v
+
+
+class _Frame:
+    def __init__(self):
+        self.calls, self.cancelled, self.n = [], [], 0
+
+    def after(self, ms, cb):
+        self.n += 1
+        self.calls.append((ms, cb))
+        return "id%d" % self.n
+
+    def after_cancel(self, i):
+        self.cancelled.append(i)
+
+
+ed = sn.Plugin.__new__(sn.Plugin)
+ed._snippets = [{"label": "Old", "text": "old text", "uses": 0}]
+ed._rows = [{"label_var": _Var(" New "), "text_widget": _Text("new text")}]
+ed._pending_edit = {}
+ed._wake = _thr.Event()
+saves = []
+ed._save = lambda: saves.append(1)
+ed._frame = _Frame()
+ed._edit_soon(0)
+ed._edit_soon(0)
+check("typing books one commit per pause, not one per key",
+      len(ed._frame.calls) == 2 and ed._frame.cancelled == ["id1"],
+      (len(ed._frame.calls), ed._frame.cancelled))
+check("after a short pause", ed._frame.calls[-1][0] <= 1000, ed._frame.calls[-1][0])
+ed._frame.calls[-1][1]()
+check("which takes the name and the text into the snippet",
+      ed._snippets[0]["label"] == "New" and ed._snippets[0]["text"] == "new text",
+      ed._snippets[0])
+check("saves it", saves != [], saves)
+check("and wakes the drawing rather than leaving it to the next round",
+      ed._wake.is_set())
+
 silent = fetch_with({"lights": None, "groups": None})
 check("a bridge that says nothing says so by address",
       "10.0.0.2" in silent._last_error, silent._last_error)
