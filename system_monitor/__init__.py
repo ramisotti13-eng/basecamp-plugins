@@ -313,6 +313,8 @@ class Plugin:
         self._stop = threading.Event()
         self._hashes = {}
         self._drawn_page = None  # key_index -> md5
+        self._vp_hashes = {}     # (pad, page, key) -> (type, value, md5) last pushed
+        self._pass_cpu = None    # the CPU percent of this pass (read once)
 
         ctx.register_translations({
             "en": {
@@ -373,8 +375,79 @@ class Plugin:
         # Prime CPU percent (first call always returns 0)
         psutil.cpu_percent(interval=0.5)
         while not stop.is_set():
+            self._pass_cpu = None
             self._update()
+            self._update_vpads()
             stop.wait(2)
+
+    def _render(self, atype, value, cpu):
+        """The picture of one key of type `atype` with the value `value` (a
+        unit, a path, an interval), or None. `cpu` is the CPU percent read
+        once for the whole pass: psutil.cpu_percent(interval=0) measures
+        since its last call, so a second call in the same pass read about 0."""
+        img = None
+        if atype == "mon_cpu":
+            pct = cpu
+            img = _render_cpu(pct)
+
+        elif atype == "mon_ram":
+            mem = psutil.virtual_memory()
+            img = _render_ram(mem.percent,
+                              mem.used / (1024**3),
+                              mem.total / (1024**3))
+
+        elif atype == "mon_temp":
+            unit = value.strip().upper()
+            unit = unit if unit == "F" else "C"
+            temp, label = _get_cpu_temp()
+            img = (_render_temp(label, temp, unit) if temp is not None
+                   else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
+
+        elif atype == "mon_gpu":
+            unit = value.strip().upper()
+            unit = unit if unit == "F" else "C"
+            temp, label = _get_gpu_temp()
+            img = (_render_temp(label, temp, unit) if temp is not None
+                   else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
+
+        elif atype == "mon_temp_both":
+            # Alternate CPU/GPU temp on one key every `interval` seconds,
+            # phased on wall-clock so it stays steady across redraws (#7).
+            interval, unit = _parse_cycle_opts(value)
+            # A phase whose sensor reads nothing says so. It used to show
+            # the other sensor instead, so a laptop with its NVIDIA card
+            # switched off showed the CPU in both halves and the cycle
+            # looked like it did nothing at all (#17).
+            cpu_first = int(time.time() / interval) % 2 == 0
+            temp, label = _get_cpu_temp() if cpu_first else _get_gpu_temp()
+            img = (_render_temp(label, temp, unit) if temp is not None
+                   else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
+
+        elif atype == "mon_disk":
+            path = value or "/"
+            try:
+                usage = psutil.disk_usage(path)
+                lbl = "DISK" if path == "/" else os.path.basename(path)
+                img = _render_disk(lbl, usage.percent,
+                                   usage.free / (1024**3))
+            except Exception:
+                pass
+
+        elif atype == "mon_disk_cycle":
+            # Rotate through every mounted filesystem on one key (#3 f/u).
+            interval, _u = _parse_cycle_opts(value)
+            disks = _list_disk_mountpoints()
+            if disks:
+                _lbl, mount = disks[int(time.time() / interval) % len(disks)]
+                try:
+                    usage = psutil.disk_usage(mount)
+                    name = "DISK" if mount == "/" else (os.path.basename(mount) or mount)
+                    img = _render_disk(name, usage.percent,
+                                       usage.free / (1024**3))
+                except Exception:
+                    pass
+
+        return img
 
     def _current_actions(self, page=None):
         """The 12 button actions of the page that is actually on the pad.
@@ -393,7 +466,54 @@ class Plugin:
         except Exception:
             return []
 
+    def _cpu_now(self):
+        """The CPU percent of this pass, read once (see _render)."""
+        if self._pass_cpu is None:
+            self._pass_cpu = psutil.cpu_percent(interval=0)
+        return self._pass_cpu
+
+    def _update_vpads(self):
+        """The same pictures on the keys of BaseCamp 4.0's virtual pads (an
+        optional extra of its plugin API; older versions have no
+        get_vpad_keys and nothing happens). A key is pushed again only when
+        its picture changed."""
+        get = getattr(self.ctx, "get_vpad_keys", None)
+        push = getattr(self.ctx, "push_vpad_image", None)
+        if get is None or push is None:
+            return
+        seen = set()
+        for atype in _MON_TYPES:
+            try:
+                keys = get(atype) or []
+            except Exception:
+                continue
+            for k in keys:
+                try:
+                    mark = (k["pad"], k["page"], k["key"])
+                except (KeyError, TypeError):
+                    continue
+                seen.add(mark)
+                value = k.get("action", "") or ""
+                try:
+                    img = self._render(atype, value, self._cpu_now())
+                except Exception:
+                    img = None
+                if img is None:
+                    continue
+                sig = (atype, value, hashlib.md5(img.tobytes()).hexdigest())
+                if self._vp_hashes.get(mark) == sig:
+                    continue
+                try:
+                    if push(k["pad"], k["key"], img):
+                        self._vp_hashes[mark] = sig
+                except Exception:
+                    pass
+        for mark in list(self._vp_hashes):
+            if mark not in seen:
+                del self._vp_hashes[mark]
+
     def _update(self):
+        self._pass_cpu = None    # a new pass reads the CPU anew
         try:
             FRAME_DIR = _frame_dir()
         except ImportError:
@@ -412,6 +532,7 @@ class Plugin:
             self._drawn_page = page
         actions = self._current_actions(page)
         dp = self.ctx.get_displaypad()
+        cpu = self._cpu_now()
 
         for i, act in enumerate(actions):
             atype = act.get("type", "")
@@ -423,66 +544,7 @@ class Plugin:
                 self._hashes.pop(i, None)
                 continue
 
-            if atype == "mon_cpu":
-                pct = psutil.cpu_percent(interval=0)
-                img = _render_cpu(pct)
-
-            elif atype == "mon_ram":
-                mem = psutil.virtual_memory()
-                img = _render_ram(mem.percent,
-                                  mem.used / (1024**3),
-                                  mem.total / (1024**3))
-
-            elif atype == "mon_temp":
-                unit = act.get("action", "").strip().upper()
-                unit = unit if unit == "F" else "C"
-                temp, label = _get_cpu_temp()
-                img = (_render_temp(label, temp, unit) if temp is not None
-                       else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
-
-            elif atype == "mon_gpu":
-                unit = act.get("action", "").strip().upper()
-                unit = unit if unit == "F" else "C"
-                temp, label = _get_gpu_temp()
-                img = (_render_temp(label, temp, unit) if temp is not None
-                       else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
-
-            elif atype == "mon_temp_both":
-                # Alternate CPU/GPU temp on one key every `interval` seconds,
-                # phased on wall-clock so it stays steady across redraws (#7).
-                interval, unit = _parse_cycle_opts(act.get("action", ""))
-                # A phase whose sensor reads nothing says so. It used to show
-                # the other sensor instead, so a laptop with its NVIDIA card
-                # switched off showed the CPU in both halves and the cycle
-                # looked like it did nothing at all (#17).
-                cpu_first = int(time.time() / interval) % 2 == 0
-                temp, label = _get_cpu_temp() if cpu_first else _get_gpu_temp()
-                img = (_render_temp(label, temp, unit) if temp is not None
-                       else _render_no_reading(label, self.ctx.T("mon_no_sensor")))
-
-            elif atype == "mon_disk":
-                path = act.get("action", "/") or "/"
-                try:
-                    usage = psutil.disk_usage(path)
-                    lbl = "DISK" if path == "/" else os.path.basename(path)
-                    img = _render_disk(lbl, usage.percent,
-                                       usage.free / (1024**3))
-                except Exception:
-                    pass
-
-            elif atype == "mon_disk_cycle":
-                # Rotate through every mounted filesystem on one key (#3 f/u).
-                interval, _u = _parse_cycle_opts(act.get("action", ""))
-                disks = _list_disk_mountpoints()
-                if disks:
-                    _lbl, mount = disks[int(time.time() / interval) % len(disks)]
-                    try:
-                        usage = psutil.disk_usage(mount)
-                        name = "DISK" if mount == "/" else (os.path.basename(mount) or mount)
-                        img = _render_disk(name, usage.percent,
-                                           usage.free / (1024**3))
-                    except Exception:
-                        pass
+            img = self._render(atype, act.get("action", ""), cpu)
 
             if img is None:
                 continue

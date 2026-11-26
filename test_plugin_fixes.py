@@ -382,6 +382,81 @@ finally:
     sm._get_gpu_temp, sm._get_cpu_temp, sm.time.time = _real_gpu, _real_cpu, _real_time
     _cfg.CONFIG_DIR, _cfg.FRAME_DIR = _real_cfg_dir, _real_frame_dir
 
+# Virtual pads of BaseCamp 4.0: the same pictures through get_vpad_keys and
+# push_vpad_image, the key's value respected, the CPU read once per pass.
+class _FakePs:
+    def __init__(self):
+        self.cpu_calls = 0
+
+    def cpu_percent(self, interval=None):
+        self.cpu_calls += 1
+        return 40.0
+
+    def virtual_memory(self):
+        class M:
+            percent, used, total = 50.0, 8 * 1024**3, 16 * 1024**3
+        return M()
+
+
+class _VpCtx(_MonCtx):
+    def __init__(self, actions, vkeys):
+        super().__init__(actions)
+        self.vkeys = vkeys                   # type -> [{pad, page, key, action}]
+        self.vpushed = []
+
+    def get_vpad_keys(self, type_id):
+        return [dict(k) for k in self.vkeys.get(type_id, [])]
+
+    def push_vpad_image(self, pad, key, img):
+        self.vpushed.append((pad, key, img))
+        return True
+
+
+_real_ps = sm.psutil
+_cfg.CONFIG_DIR = _cfg.FRAME_DIR = _tf.mkdtemp(prefix="sm-test-vp-")
+sm.psutil = _FakePs()
+sm._get_cpu_temp = lambda: (55.0, "CPU")
+try:
+    vctx = _VpCtx([{"type": "mon_cpu", "action": ""}] + [{"type": "none", "action": ""}] * 11,
+                  {"mon_ram": [{"pad": "pA", "page": 0, "key": 2, "action": ""}],
+                   "mon_cpu": [{"pad": "pA", "page": 0, "key": 3, "action": ""},
+                               {"pad": "pB", "page": 1, "key": 0, "action": ""}],
+                   "mon_temp": [{"pad": "pA", "page": 0, "key": 4, "action": "F"},
+                                {"pad": "pB", "page": 1, "key": 1, "action": "C"}]})
+    mon = sm.Plugin.__new__(sm.Plugin)
+    mon.ctx = vctx
+    mon._hashes, mon._drawn_page, mon._vp_hashes, mon._pass_cpu = {}, None, {}, None
+    mon._update()
+    mon._update_vpads()
+    got = sorted((p, k) for p, k, _i in vctx.vpushed)
+    check("virtual pads: every monitor key gets its picture",
+          got == [("pA", 2), ("pA", 3), ("pA", 4), ("pB", 0), ("pB", 1)], got)
+    check("one CPU reading for the pad and both virtual CPU keys",
+          sm.psutil.cpu_calls == 1, sm.psutil.cpu_calls)
+    pic = {(p, k): i for p, k, i in vctx.vpushed}
+    check("the key's value counts: a Fahrenheit key differs from a Celsius one",
+          pic[("pA", 4)].tobytes() != pic[("pB", 1)].tobytes())
+    check("a virtual CPU key looks like the pad's",
+          pic[("pA", 3)].tobytes() == vctx.pushed[0].tobytes())
+    del vctx.vpushed[:]
+    mon._update_vpads()
+    check("unchanged pictures are not pushed again", vctx.vpushed == [], len(vctx.vpushed))
+    gone = vctx.vkeys.pop("mon_ram")
+    mon._update_vpads()
+    vctx.vkeys["mon_ram"] = gone
+    mon._update_vpads()
+    check("a key that comes back (page switched away and back) is pushed again",
+          [(p, k) for p, k, _i in vctx.vpushed] == [("pA", 2)], vctx.vpushed)
+    old = sm.Plugin.__new__(sm.Plugin)
+    old.ctx = _MonCtx([{"type": "mon_ram", "action": ""}] + [{"type": "none", "action": ""}] * 11)
+    old._hashes, old._drawn_page, old._vp_hashes, old._pass_cpu = {}, None, {}, None
+    old._update_vpads()
+    check("without the 4.0 API (3.x) nothing happens on virtual pads", True)
+finally:
+    sm.psutil = _real_ps
+    sm._get_cpu_temp = _real_cpu
+    _cfg.CONFIG_DIR, _cfg.FRAME_DIR = _real_cfg_dir, _real_frame_dir
+
 # A failing nvidia-smi (the card switched off) is not run every two seconds.
 _runs = []
 
